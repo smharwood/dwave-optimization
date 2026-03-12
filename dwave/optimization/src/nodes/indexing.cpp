@@ -736,6 +736,85 @@ std::pair<ssize_t, ssize_t> get_mapped_index(
     return std::make_pair(offset, subspace_index);
 }
 
+// Get the predecessor arrays flat (item) indices
+// - .first is the flat index of the indexed predecessor
+// - .second is the flat index of the broadcasted indexer arrays
+std::pair<ssize_t,ssize_t> AdvancedIndexingNode::get_predecessor_flat_index(
+        const ssize_t flat_index, const State& state) const {
+    // Get axis indices into this AdvancedIndexingNode from flat_index,
+    // Use this to convert to flat index of predecessor
+
+    const auto& offsets = data_ptr<AdvancedIndexingNodeData>(state)->offsets();
+    if (!ndim()) {
+        // If this is a scalar output, its simple
+        return std::make_pair(offsets[0], 0);
+    }
+    const auto this_shape = shape(state);
+    bool hit_first_array = false;
+    // The current axis of the AdvancedIndexingNode
+    ssize_t this_axis = 0;
+    // The current axis of the indexed predecessor node
+    ssize_t pred_axis = 0;
+    // The indexed predecessor flat index that we want to calculate
+    ssize_t pred_flat_idx = 0;
+    // The flat index of the broadcasted "indexer" arrays
+    ssize_t indexer_flat_idx = 0;
+    for (const auto& index : indices()) {
+        // Calculate the index into this_axis dimension of the AdvancedIndexingNode:
+        // flat_index / item_stride[i] % shape[i]
+        this_axis = std::min(this_axis, ndim()-1);
+        ssize_t this_axis_idx =
+            flat_index / (strides()[this_axis] / itemsize()) % this_shape[this_axis];
+        if (std::holds_alternative<ArrayNode*>(index)) {
+            // The corresponding element of the broadcasted array indices contributes an offset for
+            // the predecessor flat index - but make sure to only count it once
+            pred_flat_idx += hit_first_array ? 0 : offsets[this_axis_idx];
+            // All the array indices are broadcasted together and so only contribute one dimension
+            // to this AdvancedIndexingNode
+            this_axis += hit_first_array ? 0 : 1;
+            if (!hit_first_array) {
+                // this_axis++;
+                indexer_flat_idx = this_axis_idx;
+            }
+            hit_first_array = true;
+        } else { 
+            // this index is a Slice
+            // Since our AdvancedIndexingNode only handles "simple"/empty slices, the index into
+            // this dimension contributes a predecessor's-stride--worth of offset for the flat index
+            pred_flat_idx +=
+                this_axis_idx * array_ptr_->strides()[pred_axis] / array_ptr_->itemsize();
+            this_axis++;
+        }
+        // We are always increasing in the predecessor dimension
+        pred_axis++;
+    }
+    return std::make_pair(pred_flat_idx, indexer_flat_idx);
+}
+
+ssize_t AdvancedIndexingNode::get_flat_index(
+        const ssize_t pred_flat_index, const State& state) const {
+    // See also propagate
+    auto node_data = data_ptr<AdvancedIndexingNodeData>(state);
+    const auto array_strides = array_ptr_->strides();
+    std::pair<ssize_t, ssize_t> mapped_index =
+            get_mapped_index(indices_, array_strides, array_item_strides(),
+                                array_ptr_->shape(state), strides(), itemsize(), pred_flat_index);
+    // Ideally we do
+    // const auto* idxs = node_data->get_offset_idxs(mapped_index.first);
+    // But in general this may fail an assert.
+    // Less efficient:
+    // search offsets for mapped_index.first
+    ssize_t flat_index = -1;
+    for (ssize_t idx = 0; idx < node_data->offsets().size(); ++idx) {
+        if (node_data->offsets()[idx] == mapped_index.first) {
+            const ssize_t item_stride = subspace_stride_ / itemsize();
+            flat_index = idx * item_stride + mapped_index.second;
+            break;
+        }
+    }
+    return flat_index;
+}
+
 void AdvancedIndexingNode::propagate(State& state) const {
     // Pull the data into this namespce
     auto node_data = data_ptr<AdvancedIndexingNodeData>(state);
@@ -1762,6 +1841,59 @@ std::span<const ssize_t> BasicIndexingNode::shape(const State& state) const {
     return std::span<const ssize_t>(data_ptr<BasicIndexingNodeData>(state)->dynamic_shape.get(),
                                     ndim_);
 }
+
+
+ssize_t BasicIndexingNode::get_predecessor_flat_index(
+        const ssize_t flat_index, const State& state) const {
+    // Get axis indices into this BasicIndexingNode from flat_index,
+    // Use this to convert to flat index of predecessor
+
+    const auto node_data = data_ptr<BasicIndexingNodeData>(state);
+    // The indexed predecessor flat index that we want to calculate
+    ssize_t pred_flat_idx = start_ + dynamic_start(node_data->fitted_first_slice.start);
+    // Simple/shape-based stride: product of trailing dimensions (calculate on the fly)
+    ssize_t shape_stride = 1;
+    for (ssize_t axis = ndim() - 1; axis >= 0; --axis) {
+        // Index into this axis
+        ssize_t axis_idx = (flat_index / shape_stride) % shape(state)[axis];
+        ssize_t item_stride = strides()[axis] / itemsize();
+        pred_flat_idx += axis_idx * item_stride;
+        shape_stride *= shape(state)[axis];
+    }
+    return pred_flat_idx;
+}
+
+ssize_t BasicIndexingNode::get_flat_index(const ssize_t pred_flat_index, const State& state) const {
+    // Reverse of get_predecessor_flat_index
+    // Could maybe be more efficient in certain circumstances (see propagate)
+    const auto node_data = data_ptr<BasicIndexingNodeData>(state);
+    ssize_t start = start_ + dynamic_start(node_data->fitted_first_slice.start);
+    ssize_t index = pred_flat_index - start;
+
+    const auto& this_shape = shape(state);
+    // Simple/shape-based strides
+    const auto& shape_strides = shape_to_strides(ndim(), this_shape.data());
+    // The corresponding flat index for this BasicIndexingNode
+    ssize_t flat_index = 0;
+    bool skip = false;
+    for (ssize_t axis = 0, ndim = this->ndim(); axis < ndim; axis++) {
+        ssize_t item_stride = this->strides()[axis] / this->itemsize();
+        ssize_t axis_idx = (index / item_stride);
+        if ((index < 0) || (axis_idx >= this_shape[axis])) {
+            skip = true;
+            break;
+        }
+        flat_index += axis_idx * shape_strides[axis] / this->itemsize();
+        index = index % item_stride;
+    }
+    if (index != 0) {
+        skip = true;
+    }
+    if (skip) return -1;
+    // else
+    return flat_index;
+}
+
 
 // PermutationNode ************************************************************
 

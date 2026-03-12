@@ -87,6 +87,16 @@ class AdvancedIndexingNode : public ArrayNode {
     // AdvancedIndexingHelper methods
     std::span<const array_or_slice> indices() const { return indices_; }
 
+    // Get the predecessor arrays flat (item) indices
+    // - .first is the flat index of the indexed predecessor
+    // - .second is the flat index of the broadcasted indexer arrays
+    std::pair<ssize_t,ssize_t> get_predecessor_flat_index(const ssize_t flat_index,
+                                                          const State& state) const;
+
+    // Get the flat index corresponding to the predecessor's flat index
+    ssize_t get_flat_index(const ssize_t pred_flat_index, const State& state) const;
+
+
  private:
     struct IndexParser_;
     AdvancedIndexingNode(ArrayNode* array_ptr, IndexParser_&& parser);
@@ -216,6 +226,13 @@ class BasicIndexingNode : public ArrayNode {
 
     // Infer the indices used to create the node.
     std::vector<slice_or_int> infer_indices() const;
+
+    // Get the predecessor array flat (item) index
+    ssize_t get_predecessor_flat_index(const ssize_t flat_index, const State& state) const;
+
+    // Get the flat index corresponding to the predecessor's flat index
+    ssize_t get_flat_index(const ssize_t pred_flat_index, const State& state) const;
+
 
  private:
     // Private constructor using an intermediate object

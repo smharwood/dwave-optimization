@@ -536,6 +536,18 @@ TEST_CASE("AdvancedIndexingNode") {
                     CHECK(std::ranges::equal(arr_ptr->view(state), values));
                     CHECK_THAT(adv->view(state), RangeEquals({20, 21, 22, 23, 24, 5, 6, 7, 8, 9}));
                 }
+
+                AND_WHEN("We convert to and from the flat indices") {
+                    bool all_match = true;
+                    for (ssize_t i = 0; i < adv->size(); ++i) {
+                        auto pred_flat_idx = adv->get_predecessor_flat_index(i, state);
+                        ssize_t flat_idx = adv->get_flat_index(pred_flat_idx.first, state);
+                        all_match = all_match && (i == flat_idx);
+                    }
+                    THEN("The roundtrip indices agree") {
+                        CHECK(all_match);
+                    }
+                }
             }
         }
 

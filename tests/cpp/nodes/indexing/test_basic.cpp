@@ -498,6 +498,16 @@ TEST_CASE("BasicIndexingNode") {
                     CHECK(std::ranges::equal(ptr->shape(state), ptr->shape()));
                     CHECK_THAT(ptr->view(state), RangeEquals({6}));
                 }
+
+                AND_WHEN("We convert to and from the flat index") {
+                    // element 6 has index 5 in the predecessor flat array
+                    auto flat_index = ptr->get_flat_index(5, state);
+                    auto pred_flat_index = ptr->get_predecessor_flat_index(0, state);
+                    THEN("The indices agree") {
+                        CHECK(flat_index == 0);
+                        CHECK(pred_flat_index == 5);
+                    }
+                }
             }
         }
 
@@ -519,6 +529,18 @@ TEST_CASE("BasicIndexingNode") {
                     CHECK(ptr->size(state) == 2);
                     CHECK(std::ranges::equal(ptr->shape(state), ptr->shape()));
                     CHECK_THAT(ptr->view(state), RangeEquals({3, 4}));
+                }
+
+                AND_WHEN("We convert to and from the flat indices") {
+                    bool all_match = true;
+                    for (int i = 0; i < ptr->size(state); ++i){
+                        auto pred_flat_index = ptr->get_predecessor_flat_index(i, state);
+                        auto flat_index = ptr->get_flat_index(pred_flat_index, state);
+                        all_match = all_match && (i == flat_index);
+                    }
+                    THEN("The roundtrip indices agree") {
+                        CHECK(all_match);
+                    }
                 }
             }
         }
